@@ -1,7 +1,8 @@
 # XV6-COW-LAB
 Implemented the copy-on-write mechanism for the xv6-riscv os.
 
-   **lab** : https://pdos.csail.mit.edu/6.S081/2020/labs/cow.html
+**lab** : https://pdos.csail.mit.edu/6.S081/2020/labs/cow.html
+
 # XV6-RISCV
 xv6 is a re-implementation of Dennis Ritchie's and Ken Thompson's UnixVersion 6 (v6).
 xv6 loosely follows the structure and style of v6,
