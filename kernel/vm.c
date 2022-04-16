@@ -281,6 +281,7 @@ freewalk(pagetable_t pagetable)
   kfree((void*)pagetable);
 }
 
+
 // Free user memory pages,
 // then free page-table pages.
 void
@@ -298,33 +299,33 @@ uvmfree(pagetable_t pagetable, uint64 sz)
 // returns 0 on success, -1 on failure.
 // frees any allocated pages on failure.
 int
-uvmcopy(pagetable_t old, pagetable_t new, uint64 sz)
+uvmcopy(pagetable_t old, pagetable_t new, uint64 pt_size)
 {
   pte_t *pte;
   uint64 pa, i;
-  uint flags;
-  char *mem;
 
-  for(i = 0; i < sz; i += PGSIZE){
-    if((pte = walk(old, i, 0)) == 0)
+  for (i = 0; i < pt_size; i += PGSIZE)
+  {
+    /* get adress of page table entry (in pagetable) that corresponds to 
+     virtual adress of i */
+    if ((pte = walk(old, i, 0)) == 0)
       panic("uvmcopy: pte should exist");
-    if((*pte & PTE_V) == 0)
+    if ((*pte & PTE_V) == 0)
       panic("uvmcopy: page not present");
-    pa = PTE2PA(*pte);
-    flags = PTE_FLAGS(*pte);
-    if((mem = kalloc()) == 0)
-      goto err;
-    memmove(mem, (char*)pa, PGSIZE);
-    if(mappages(new, i, PGSIZE, (uint64)mem, flags) != 0){
-      kfree(mem);
-      goto err;
+    pa = PTE2PA(*pte);  //convert pagetable entry to page adress
+    // add ~PTE_W flag -> instructions wont be allowed to write on the page
+    *pte &= (~PTE_W);
+    // increase the reference counter to the page of the pagetable
+    int page_number = pa/PGSIZE;
+    add_reference(page_number);
+    // map the page of the old pagetable to the childrens pagetable with the same flags
+    if (mappages(new, i, PGSIZE, (uint64)pa, PTE_FLAGS(*pte)) != 0)
+    {
+      uvmunmap(new, 0, i / PGSIZE, 1);
+      return -1;
     }
   }
   return 0;
-
- err:
-  uvmunmap(new, 0, i / PGSIZE, 1);
-  return -1;
 }
 
 // mark a PTE invalid for user access.
@@ -350,6 +351,7 @@ copyout(pagetable_t pagetable, uint64 dstva, char *src, uint64 len)
 
   while(len > 0){
     va0 = PGROUNDDOWN(dstva);
+    if(cowfault_handler(pagetable, va0) < 0)     return -1;
     pa0 = walkaddr(pagetable, va0);
     if(pa0 == 0)
       return -1;
@@ -431,4 +433,32 @@ copyinstr(pagetable_t pagetable, char *dst, uint64 srcva, uint64 max)
   } else {
     return -1;
   }
+}
+
+
+
+int cowfault_handler(pagetable_t pagetable, uint64 virtual_adress)
+{
+  pte_t* pt_entry;
+  uint64 old_pa, new_pa;
+  if (virtual_adress >= MAXVA)    return -1;
+  if ((pt_entry = walk(pagetable, virtual_adress, 0)) == 0)   return -1;
+  /* if user is not suppossed to access the page or the pte is not present 
+   or the page is not read only   return -1 */
+  if ((*pt_entry & PTE_U)
+   && (*pt_entry & PTE_V)
+   && (*pt_entry & ~PTE_W))
+  {
+    old_pa = PTE2PA(*pt_entry);
+    // allocate new page
+    if ((new_pa = (uint64)kalloc()) == 0) return -1;
+    // copy old page to new page
+    memmove((void *)new_pa, (void *)old_pa, PGSIZE);
+    // update new address with updated flags
+    *pt_entry = PA2PTE(new_pa) | PTE_FLAGS(*pt_entry) | PTE_W;
+    // decrease reference counter 
+    kfree((void *)old_pa);
+    return 0;
+  }
+  return -1;
 }

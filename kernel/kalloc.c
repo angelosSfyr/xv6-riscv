@@ -30,13 +30,37 @@ kinit()
   freerange(end, (void*)PHYSTOP);
 }
 
-void
-freerange(void *pa_start, void *pa_end)
+int reference_counter[PHYSTOP / PGSIZE];
+
+// called by kinit to acquire memory for freelist with kfree
+void freerange(void *pa_start, void *pa_end)
 {
-  char *p;
-  p = (char*)PGROUNDUP((uint64)pa_start);
-  for(; p + PGSIZE <= (char*)pa_end; p += PGSIZE)
+  // PGROUNDUP ensures that we free only aligned physical adresses
+  char *p = (char *)PGROUNDUP((uint64)pa_start);
+  for (; p + PGSIZE <= (char *)pa_end; p += PGSIZE)
+  {
+    // initialize reference counter for every page
+    int page_number = ((uint64)p)/ PGSIZE;
+    reference_counter[page_number] = 1; // kfree decreases reference counter
     kfree(p);
+  }
+}
+
+// increases reference counter
+void add_reference(int page_number)
+{
+  acquire(&kmem.lock);
+  reference_counter[page_number]++;
+  release(&kmem.lock);
+}
+
+// decreases reference counter and returns it
+int remove_reference(int page_number)
+{
+  acquire(&kmem.lock);
+  reference_counter[page_number]--;
+  release(&kmem.lock);
+  return reference_counter[page_number];
 }
 
 // Free the page of physical memory pointed at by v,
@@ -46,20 +70,21 @@ freerange(void *pa_start, void *pa_end)
 void
 kfree(void *pa)
 {
-  struct run *r;
-
-  if(((uint64)pa % PGSIZE) != 0 || (char*)pa < end || (uint64)pa >= PHYSTOP)
+  struct run *r  = (struct run *)pa;
+  if (((uint64)pa % PGSIZE) != 0 || (char *)pa < end || (uint64)pa >= PHYSTOP)
     panic("kfree");
-
-  // Fill with junk to catch dangling refs.
-  memset(pa, 1, PGSIZE);
-
-  r = (struct run*)pa;
-
-  acquire(&kmem.lock);
-  r->next = kmem.freelist;
-  kmem.freelist = r;
-  release(&kmem.lock);
+  int page_number = (uint64)r / PGSIZE;
+  
+  if (remove_reference(page_number) == 0)
+  {
+    // Fill with junk to catch dangling refs.
+    memset(pa, 1, PGSIZE);
+    acquire(&kmem.lock);
+    r->next = kmem.freelist;
+    kmem.freelist = r;
+    release(&kmem.lock);
+  }
+  return;
 }
 
 // Allocate one 4096-byte page of physical memory.
@@ -68,15 +93,19 @@ kfree(void *pa)
 void *
 kalloc(void)
 {
+  // each free page's list element is a struct run
   struct run *r;
-
   acquire(&kmem.lock);
   r = kmem.freelist;
-  if(r)
+  if (r)
+  {
+    int page_number = (uint64)r / PGSIZE;
+    reference_counter[page_number] = 1; // pages gets attached to a process --> increase counter
     kmem.freelist = r->next;
+  }
   release(&kmem.lock);
 
-  if(r)
-    memset((char*)r, 5, PGSIZE); // fill with junk
-  return (void*)r;
+  if (r)
+    memset((char *)r, 5, PGSIZE); // fill with junk
+  return (void *)r;
 }
